@@ -227,6 +227,13 @@ def append_row(
     if len(row_vals) < width:
         row_vals.extend([""] * (width - len(row_vals)))
     else:
+        if len(row_vals) > width:
+            log.warning(
+                "строка длиннее диапазона %s: передано %s ячеек, лишнее обрезано "
+                "(для колонки «Снятия» задайте GOOGLE_SHEETS_RANGE с F, например Отчеты!A:F)",
+                range_a1,
+                len(row_vals),
+            )
         row_vals = row_vals[:width]
 
     creds = _load_sheets_credentials()
