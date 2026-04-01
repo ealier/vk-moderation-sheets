@@ -84,15 +84,17 @@ def _parsed_to_row(parsed: dict, from_id: int, received_iso: str) -> list[str]:
         pd = (parsed.get("playtime_display") or "").strip()
         time_cell = pd or (f"{h} часов" if h else "")
         pun = parsed.get("punishments_total") or parsed.get("punishments_note") or ""
+        rem = (parsed.get("removals") or "").strip()
         return [
             str(parsed.get("nick") or ""),
             _sheet_text_date(str(parsed.get("report_date") or "")),
             time_cell,
             str(pun).strip(),
             str(parsed.get("modes") or ""),
+            rem,
         ]
     if rt == "vacation":
-        # Отгулы/отпуска не пишем в эту таблицу (у неё формат только A:E)
+        # Отгулы/отпуска не пишем в эту таблицу
         return []
     return []
 
