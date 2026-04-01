@@ -51,18 +51,47 @@ def _parse_sub_numbered(line: str) -> tuple[int, int, str] | None:
     return int(m.group(1)), int(m.group(2)), m.group(3).strip()
 
 
+def _normalize_spaces_for_split(s: str) -> str:
+    """ВК иногда даёт NBSP/тонкие пробелы или склеивает ] и 6 — приводим к обычным пробелам."""
+    s = re.sub(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]", " ", s)
+    return s
+
+
+def _split_trailing_item_six_from_five(item5: str) -> tuple[str, str | None]:
+    """
+    Хвост «6. …» в конце строки режимов (часто в одной строке с пунктом 5).
+    Варианты: «… | МГ [12] 6. 12», «…[12]6. 12», с неразрывным пробелом перед 6.
+    """
+    s = _normalize_spaces_for_split(item5)
+    patterns = (
+        r"\s+6[\.．]\s*(.+)$",  # пробел перед 6
+        r"\]\s*6[\.．]\s*(.+)$",  # сразу после ] без пробела: [12]6. 12
+        r"6[\.．]\s*(.+)$",  # последний «6. …» у конца строки (если других «6.» нет)
+    )
+    for pat in patterns:
+        m = re.search(pat, s)
+        if m:
+            head = s[: m.start()].strip()
+            tail = m.group(1).strip()
+            if head:
+                return head, tail
+    return item5, None
+
+
 def _finalize_items_dict(
     items: dict[int, str], four_subs: list[str], seen_main_4: bool
 ) -> dict[str, Any] | None:
     if not items.get(1):
         return None
     it = dict(items)
-    # Пункт 6 иногда в одной строке с 5 (ВК склеил или одна строка): «… | МГ [12] 6. 12»
-    if it.get(5) and not it.get(6):
-        m = re.search(r"\s+6[\.．]\s*(.+)$", it[5])
-        if m:
-            it[5] = it[5][: m.start()].strip()
-            it[6] = m.group(1).strip()
+    # Пункт 6 часто дублируется: в конце строки 5 («… 6. 12») и отдельной строкой «6. 12» —
+    # тогда items[6] уже есть, но items[5] всё ещё с хвостом; хвост всегда отрезаем.
+    if it.get(5):
+        head, tail = _split_trailing_item_six_from_five(it[5])
+        if tail is not None:
+            it[5] = head
+            if not it.get(6):
+                it[6] = tail
     if it.get(3) and it.get(4):
         it[3], it[4] = _maybe_swap_playtime_punish(it[3], it[4])
     modes_parts: list[str] = []
