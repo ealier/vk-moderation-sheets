@@ -26,8 +26,12 @@ def _parse_main_line(line: str) -> tuple[int, str] | None:
     s = line.strip()
     if not s:
         return None
+    # «6.12» без пробела после точки: общий шаблон с (?!\d) не матчится (как и подпункты 4.1)
+    m6 = re.match(r"^\s*6\.\s*(\d+)\s*$", s)
+    if m6:
+        return 6, m6.group(1).strip()
     m = re.match(
-        r"^\s*(?:▹\s*)?(?:\(([1-5])\)\s*(.*)|([1-5])\.(?!\d)\s*(.*)|([1-5])\)\s*(.*))$",
+        r"^\s*(?:▹\s*)?(?:\(([1-6])\)\s*(.*)|([1-6])\.(?!\d)\s*(.*)|([1-6])\)\s*(.*))$",
         s,
         re.I,
     )
@@ -53,6 +57,12 @@ def _finalize_items_dict(
     if not items.get(1):
         return None
     it = dict(items)
+    # Пункт 6 иногда в одной строке с 5 (ВК склеил или одна строка): «… | МГ [12] 6. 12»
+    if it.get(5) and not it.get(6):
+        m = re.search(r"\s+6[\.．]\s*(.+)$", it[5])
+        if m:
+            it[5] = it[5][: m.start()].strip()
+            it[6] = m.group(1).strip()
     if it.get(3) and it.get(4):
         it[3], it[4] = _maybe_swap_playtime_punish(it[3], it[4])
     modes_parts: list[str] = []
@@ -62,12 +72,14 @@ def _finalize_items_dict(
     modes = " | ".join(p for p in modes_parts if p and p.strip()) or None
     pun = it.get(4)
     punishments_total, punishments_note = _punishments_from_line(pun, four_subs)
+    rem = (it.get(6) or "").strip() or None
     return {
         "items": it,
         "four_subs": list(four_subs),
         "modes": modes,
         "punishments_total": punishments_total,
         "punishments_note": punishments_note,
+        "removals": rem,
         "seen_main_4": seen_main_4,
     }
 
@@ -82,7 +94,7 @@ def _extract_numbered_block(lines: list[str]) -> dict[str, Any] | None:
         return _finalize_items_dict(items, four_subs, seen_main_4)
 
     for line in lines:
-        s = line.strip()
+        s = re.sub(r"[\u200b-\u200d\ufeff]", "", line.strip()).replace("\uFF0E", ".")
         if not s:
             continue
 
@@ -94,6 +106,9 @@ def _extract_numbered_block(lines: list[str]) -> dict[str, Any] | None:
 
         main = _parse_main_line(s)
         if not main:
+            if mode == "g6" and items.get(6) is not None:
+                items[6] = (items[6] + " " + s).strip()
+                continue
             if mode == "g5" and items.get(5) is not None:
                 if s.startswith("(") or not _parse_sub_numbered(s):
                     items[5] = (items[5] + " " + s).strip()
@@ -124,14 +139,23 @@ def _extract_numbered_block(lines: list[str]) -> dict[str, Any] | None:
         elif n == 5 and mode in ("g3", "g4s", "g4") and items.get(3):
             items[5] = content
             mode = "g5"
+        elif n == 6 and mode in ("g3", "g4s", "g4", "g5") and items.get(5):
+            items[6] = content
+            mode = "g6"
 
     return pack()
 
 
 def _maybe_swap_playtime_punish(a: str, b: str) -> tuple[str, str]:
     a, b = a.strip(), b.strip()
-    if re.match(r"^\d+$", a) and re.search(r"час|часа|часов|\d+[,.]?\d*\s*час|\d+\s*ч\b", b, re.I):
+    time_rx = re.compile(
+        r"час|часа|часов|\d+[,.]?\d*\s*час|\d+\s*ч\b|\d+\s*h\b|\d+h\b|\d+\s*m\b",
+        re.I,
+    )
+    if re.match(r"^\d+$", a) and time_rx.search(b):
         return b, a
+    if time_rx.search(a) and re.match(r"^\d+$", b):
+        return a, b
     return a, b
 
 
@@ -159,7 +183,7 @@ def _try_unnumbered_compact(lines: list[str]) -> dict[str, Any] | None:
     nonempty = [ln.strip() for ln in lines if ln.strip()]
     if len(nonempty) < 5:
         return None
-    for ln in nonempty[:6]:
+    for ln in nonempty[:7]:
         if _parse_main_line(ln):
             return None
     nick, d2, d3, d4, d5 = nonempty[0], nonempty[1], nonempty[2], nonempty[3], nonempty[4]
@@ -167,18 +191,12 @@ def _try_unnumbered_compact(lines: list[str]) -> dict[str, Any] | None:
         r"\d{1,2}\s+[А-Яа-я]+\.?", d2
     ):
         return None
-    items = {1: nick, 2: d2, 3: d3, 4: d4, 5: d5}
-    tail = nonempty[5:]
-    modes = (d5 + (" " + " ".join(tail) if tail else "")).strip()
-    pun_num, _ = _punishments_from_line(d4, [])
-    return {
-        "items": items,
-        "four_subs": [],
-        "modes": modes,
-        "punishments_total": pun_num,
-        "punishments_note": d4,
-        "seen_main_4": True,
-    }
+    items: dict[int, str] = {1: nick, 2: d2, 3: d3, 4: d4, 5: d5}
+    if len(nonempty) > 5:
+        items[6] = nonempty[5]
+        if len(nonempty) > 6:
+            items[6] = (items[6] + " " + " ".join(nonempty[6:])).strip()
+    return _finalize_items_dict(items, [], True)
 
 
 def _try_space_prefix_block(lines: list[str]) -> dict[str, Any] | None:
@@ -195,16 +213,22 @@ def _try_space_prefix_block(lines: list[str]) -> dict[str, Any] | None:
     d = m2.group(1).strip()
     if not re.match(r"^\d{1,2}[\./]\d{1,2}(\.\d{2,4})?$", d):
         return None
-    items = {
+    items: dict[int, str] = {
         1: m1.group(1).strip(),
         2: d,
         3: nonempty[2],
         4: nonempty[3],
         5: nonempty[4],
     }
-    tail = nonempty[5:]
-    if tail:
-        items[5] = (items[5] + " " + " ".join(tail)).strip()
+    if len(nonempty) >= 6:
+        items[6] = nonempty[5]
+        tail = nonempty[6:]
+        if tail:
+            items[6] = (items[6] + " " + " ".join(tail)).strip()
+    else:
+        tail = nonempty[5:]
+        if tail:
+            items[5] = (items[5] + " " + " ".join(tail)).strip()
     return _finalize_items_dict(items, [], True)
 
 
@@ -247,9 +271,9 @@ def _looks_like_moderation(text: str) -> bool:
         re.I,
     ):
         return True
-    if re.search(r"^\s*(?:▹\s*)?[1-5][\.\)]", text, re.I | re.MULTILINE):
+    if re.search(r"^\s*(?:▹\s*)?[1-6][\.\)]", text, re.I | re.MULTILINE):
         return True
-    if re.search(r"(?m)^\s*\([1-5]\)\s+\S", text):
+    if re.search(r"(?m)^\s*\([1-6]\)\s+\S", text):
         return True
     if re.search(r"(?m)^\s*1\s+\S+.*\n\s*2\s+\d{1,2}[\./]", text):
         return True
@@ -305,6 +329,7 @@ def _parse_moderation(text: str) -> dict[str, Any]:
     playtime_display = (it.get(3) or "").strip()
     punishments_total = blk.get("punishments_total") or ""
     modes = blk.get("modes")
+    removals = blk.get("removals")
 
     ph = _extract_hours_numeric(playtime_display)
     return {
@@ -316,6 +341,7 @@ def _parse_moderation(text: str) -> dict[str, Any]:
         "punishments_total": punishments_total or None,
         "punishments_note": ((it.get(4) or "").strip() or None) if not punishments_total else None,
         "modes": modes,
+        "removals": removals,
         "raw": text[:8000],
     }
 
@@ -355,6 +381,7 @@ def _parse_moderation_loose(text: str) -> dict[str, Any]:
         "playtime_display": pd,
         "punishments_total": total_pun,
         "modes": modes,
+        "removals": None,
         "raw": text[:8000],
     }
 
@@ -366,6 +393,9 @@ def _extract_hours_numeric(s: str | None) -> str | None:
     if m:
         return m.group(1).replace(",", ".")
     m = re.search(r"(\d+)\s*ч\b", s, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"(\d+)\s*h\b", s, re.I) or re.search(r"(\d+)h\b", s, re.I)
     if m:
         return m.group(1)
     m = re.search(r"(\d+)\s*m\b", s, re.I)
