@@ -1,0 +1,10 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+service-account-keys.json
+# Ключ Google Service Account (секрет — только локально или в переменных на хостинге)
+vk-moderation-bot*.json
+*.json
