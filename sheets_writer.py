@@ -205,7 +205,7 @@ def append_row(
     range_a1: str,
     values: Sequence[str | int],
     *,
-    vk_message_id: int | None = None,
+    vk_dedupe_key: str | None = None,
 ) -> None:
     """
     Добавляет строку строго в колонки из range (например A:E).
@@ -214,8 +214,8 @@ def append_row(
     если «таблица» определилась не с колонки A — поэтому используем
     чтение диапазона и явный update в A{n}:E{n}.
 
-    vk_message_id: ID сообщения ВК — при повторной доставке колбэка та же строка
-    не пишется второй раз (лист GOOGLE_SHEETS_DEDUP_SHEET, по умолчанию __vk_dedup).
+    vk_dedupe_key: стабильный ключ события ВК (id сообщения или peer+cmid) —
+    при повторной доставке колбэка строка не дублируется (лист __vk_dedup).
     """
     spreadsheet_id = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
     if not spreadsheet_id:
@@ -240,14 +240,14 @@ def append_row(
         .execute()
     )
     rows = result.get("values") or []
-    if vk_message_id is not None:
+    if vk_dedupe_key:
         dedup = _ensure_dedup_sheet(service, spreadsheet_id)
-        sid = str(vk_message_id)
+        sid = vk_dedupe_key.strip()
         if sid in _existing_dedup_ids(service, spreadsheet_id, dedup):
-            log.info("skip sheet: duplicate VK message_id=%s", sid)
+            log.info("skip sheet: duplicate VK dedupe_key=%r", sid)
             return
     elif _last_row_matches(rows, width, row_vals):
-        log.info("skip sheet: last row identical (no message id)")
+        log.info("skip sheet: last row identical (no dedupe key)")
         return
 
     # Не брать «нижнюю» строку из result["range"]: при запросе A1:E50000 API
@@ -269,9 +269,9 @@ def append_row(
         .execute()
     )
 
-    if vk_message_id is not None:
+    if vk_dedupe_key:
         try:
             dedup = _ensure_dedup_sheet(service, spreadsheet_id)
-            _append_dedup_id(service, spreadsheet_id, dedup, str(vk_message_id))
+            _append_dedup_id(service, spreadsheet_id, dedup, vk_dedupe_key.strip())
         except Exception:
-            log.exception("dedup append failed for message_id=%s", vk_message_id)
+            log.exception("dedup append failed for key=%r", vk_dedupe_key)

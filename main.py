@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -21,6 +22,26 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("vk_sheet")
 
 app = FastAPI()
+
+# Один запрос к Sheets за раз: два параллельных колбэка ВК не должны оба пройти дедуп.
+_sheet_write_lock = asyncio.Lock()
+
+
+def _vk_dedupe_key(msg: dict) -> str | None:
+    """Ключ для антидубликата: id сообщения (как в ВК) или peer_id + conversation_message_id."""
+    mid = msg.get("id")
+    if mid is not None:
+        try:
+            i = int(mid)
+            if i != 0:
+                return str(i)
+        except (TypeError, ValueError):
+            pass
+    cmid = msg.get("conversation_message_id")
+    peer = msg.get("peer_id")
+    if cmid is not None and peer is not None:
+        return f"p{peer}_c{cmid}"
+    return None
 
 
 def _vk_confirmation() -> str:
@@ -167,13 +188,22 @@ async def vk_callback(request: Request):
         )
         return PlainTextResponse("ok")
 
+    dedupe = _vk_dedupe_key(msg)
+    if not dedupe:
+        log.warning(
+            "vk message without dedupe id (possible duplicates on retry): from_id=%s keys=%s",
+            from_id,
+            sorted(msg.keys()),
+        )
+
     try:
-        vk_mid = msg.get("id")
-        vk_mid_i = int(vk_mid) if vk_mid is not None else None
-        append_row(_sheet_range(), row, vk_message_id=vk_mid_i)
+        async with _sheet_write_lock:
+            await asyncio.to_thread(
+                append_row, _sheet_range(), row, vk_dedupe_key=dedupe
+            )
     except Exception:
         log.exception("sheet")
         return PlainTextResponse("sheet err", status_code=500)
 
-    log.info("sheet ok from_id=%s nick=%r", from_id, row[0])
+    log.info("sheet ok from_id=%s nick=%r dedupe=%r", from_id, row[0], dedupe)
     return PlainTextResponse("ok")
