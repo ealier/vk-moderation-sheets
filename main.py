@@ -168,7 +168,9 @@ async def vk_callback(request: Request):
         return PlainTextResponse("ok")
 
     try:
-        append_row(_sheet_range(), row)
+        vk_mid = msg.get("id")
+        vk_mid_i = int(vk_mid) if vk_mid is not None else None
+        append_row(_sheet_range(), row, vk_message_id=vk_mid_i)
     except Exception:
         log.exception("sheet")
         return PlainTextResponse("sheet err", status_code=500)

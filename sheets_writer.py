@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 from typing import Any, Sequence
@@ -10,6 +11,10 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
+
+log = logging.getLogger("vk_sheet")
+
+DEDUP_SHEET_DEFAULT = "__vk_dedup"
 
 
 def _load_sheets_credentials():
@@ -99,6 +104,75 @@ def _sheet_id_and_row_count(service: Any, spreadsheet_id: str, title: str) -> tu
     raise ValueError(f"лист не найден: {title!r}")
 
 
+def _dedup_sheet_name() -> str:
+    s = (os.environ.get("GOOGLE_SHEETS_DEDUP_SHEET") or "").strip()
+    return s or DEDUP_SHEET_DEFAULT
+
+
+def _ensure_dedup_sheet(service: Any, spreadsheet_id: str) -> str:
+    name = _dedup_sheet_name()
+    meta = (
+        service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields="sheets(properties(title))")
+        .execute()
+    )
+    titles = {sh["properties"]["title"] for sh in meta.get("sheets", [])}
+    if name in titles:
+        return name
+    (
+        service.spreadsheets()
+        .batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": name}}}]},
+        )
+        .execute()
+    )
+    return name
+
+
+def _existing_dedup_ids(service: Any, spreadsheet_id: str, dedup_sheet: str) -> set[str]:
+    prefix = _sheet_a1_prefix(dedup_sheet)
+    r = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=f"{prefix}!A1:A50000")
+        .execute()
+    )
+    out: set[str] = set()
+    for row in r.get("values") or []:
+        if row and str(row[0]).strip():
+            out.add(str(row[0]).strip())
+    return out
+
+
+def _append_dedup_id(service: Any, spreadsheet_id: str, dedup_sheet: str, msg_id: str) -> None:
+    prefix = _sheet_a1_prefix(dedup_sheet)
+    (
+        service.spreadsheets()
+        .values()
+        .append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{prefix}!A:A",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [[msg_id]]},
+        )
+        .execute()
+    )
+
+
+def _last_row_matches(
+    rows: list[list[Any]], width: int, row_vals: list[str]
+) -> bool:
+    if not rows:
+        return False
+    last = rows[-1]
+    cells = [str(c).strip() for c in last[:width]]
+    while len(cells) < width:
+        cells.append("")
+    return cells == row_vals
+
+
 def _ensure_grid_has_row(
     service: Any, spreadsheet_id: str, sheet_title: str, next_row: int
 ) -> None:
@@ -127,13 +201,21 @@ def _ensure_grid_has_row(
     )
 
 
-def append_row(range_a1: str, values: Sequence[str | int]) -> None:
+def append_row(
+    range_a1: str,
+    values: Sequence[str | int],
+    *,
+    vk_message_id: int | None = None,
+) -> None:
     """
     Добавляет строку строго в колонки из range (например A:E).
 
     values().append в Google Sheets иногда смещает строку (например в D:H),
     если «таблица» определилась не с колонки A — поэтому используем
     чтение диапазона и явный update в A{n}:E{n}.
+
+    vk_message_id: ID сообщения ВК — при повторной доставке колбэка та же строка
+    не пишется второй раз (лист GOOGLE_SHEETS_DEDUP_SHEET, по умолчанию __vk_dedup).
     """
     spreadsheet_id = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
     if not spreadsheet_id:
@@ -158,6 +240,16 @@ def append_row(range_a1: str, values: Sequence[str | int]) -> None:
         .execute()
     )
     rows = result.get("values") or []
+    if vk_message_id is not None:
+        dedup = _ensure_dedup_sheet(service, spreadsheet_id)
+        sid = str(vk_message_id)
+        if sid in _existing_dedup_ids(service, spreadsheet_id, dedup):
+            log.info("skip sheet: duplicate VK message_id=%s", sid)
+            return
+    elif _last_row_matches(rows, width, row_vals):
+        log.info("skip sheet: last row identical (no message id)")
+        return
+
     # Не брать «нижнюю» строку из result["range"]: при запросе A1:E50000 API
     # подставляет конец сетки листа (напр. …E1009), а не последнюю строку с данными —
     # получится next_row за пределами таблицы и ошибка 400.
@@ -176,3 +268,10 @@ def append_row(range_a1: str, values: Sequence[str | int]) -> None:
         )
         .execute()
     )
+
+    if vk_message_id is not None:
+        try:
+            dedup = _ensure_dedup_sheet(service, spreadsheet_id)
+            _append_dedup_id(service, spreadsheet_id, dedup, str(vk_message_id))
+        except Exception:
+            log.exception("dedup append failed for message_id=%s", vk_message_id)
